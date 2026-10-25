@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Dobson Pilot</title>
+<style>
+:root{--bg:#000;--fg:#e8554a;--dim:#7a2a24;--line:#4a1a16;--btn:#1a0907;color-scheme:dark}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom)}
+h1{font-size:18px;margin:12px 0}h2{font-size:14px;margin:0 0 8px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+section{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
+button,input,select{font:inherit;color:var(--fg);background:var(--btn);border:1px solid var(--line);border-radius:8px;padding:10px}
+button{min-height:44px}button:active{background:var(--dim)}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
+.row input{width:64px}.row label{font-size:13px;color:var(--dim)}
+#pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:300px;margin:8px auto;touch-action:none}
+#pad button{height:72px;font-size:22px;touch-action:none;user-select:none;-webkit-user-select:none}
+#log{height:170px;overflow:auto;font:12px/1.35 ui-monospace,monospace;white-space:pre-wrap;border:1px solid var(--line);border-radius:8px;padding:6px}
+.tx{color:#caa}.rx{color:#e8554a}.er{color:#fff}
+#st{font-size:14px}#nobt{border:1px solid var(--fg);padding:8px;border-radius:8px}
+input[type=range]{width:100%;padding:0}
+</style>
+</head>
+<body>
+<h1>Dobson Pilot <small style="color:var(--dim)">client BLE non ufficiale</small></h1>
+<div id="nobt" hidden>Questo browser non supporta Web Bluetooth. Su iPhone usa Bluefy (o un browser/estensione con Web Bluetooth); su Android usa Chrome.</div>
+
+<section>
+<h2>Connessione</h2>
+<div class="row"><button id="bConn">Connetti</button><button id="bDisc" disabled>Disconnetti</button><span id="st">non connesso</span></div>
+</section>
+
+<section>
+<h2>Joystick</h2>
+<div class="row"><button id="bJoy">Avvia modo joystick</button><label>Velocità <span id="spv">5</span></label></div>
+<input id="sp" type="range" min="1" max="10" value="5">
+<div id="pad"></div>
+</section>
+
+<section>
+<h2>GoTo (coordinate)</h2>
+<div class="row"><label>AR</label><input id="ra_h" placeholder="h" inputmode="numeric"><input id="ra_m" placeholder="m" inputmode="numeric"><input id="ra_s" placeholder="s" inputmode="numeric"></div>
+<div class="row"><label>Dec</label><select id="dsg"><option value="1">+</option><option value="-1">−</option></select><input id="de_d" placeholder="°" inputmode="numeric"><input id="de_m" placeholder="'" inputmode="numeric"><input id="de_s" placeholder='"' inputmode="numeric"></div>
+<div class="row"><button id="bGoto">GoTo</button><button id="bStop">Stop GoTo</button></div>
+<div class="row"><button id="bCal0">Avvia allineamento</button><button id="bCal1">Allinea 1 stella qui</button></div>
+</section>
+
+<section>
+<h2>GoTo (Sistema solare)</h2>
+<div class="row"><select id="sol"></select><button id="bSol">GoTo</button></div>
+</section>
+
+<section>
+<h2>Impostazioni</h2>
+<div class="row"><label><input type="checkbox" id="utc" checked style="width:auto"> invia ora in UTC</label></div>
+<div class="row"><button id="bSync">Sincronizza data/ora/posizione</button></div>
+<div class="row"><button id="bShow">Mostra impostazioni</button><button id="bRel">Rilascia motori</button></div>
+</section>
+
+<section>
+<h2>Console</h2>
+<div id="log"></div>
+<div class="row"><input id="raw" style="flex:1;width:auto" placeholder="CMD ..." autocapitalize="characters"><button id="bRaw">Invia</button></div>
+</section>
+
+<script>
+const SVC=0x00FF, CHR=0xFF01, enc=new TextEncoder(), dec=new TextDecoder();
+const $=s=>document.querySelector(s);
+let dev=null, chr=null, joy=false, ka=null, q=Promise.resolve();
+
+function log(k,t){const d=$('#log'),e=document.createElement('div');e.className=k;e.textContent=(k==='tx'?'> ':k==='rx'?'< ':'! ')+t;d.append(e);d.scrollTop=d.scrollHeight}
+function st(t){$('#st').textContent=t}
+
+if(!navigator.bluetooth) $('#nobt').hidden=false;
+
+async function connect(){
+  try{
+    dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'CosmoPilot'}],optionalServices:[SVC]});
+    dev.addEventListener('gattserverdisconnected',onDisc);
+    st('connessione...');
+    const srv=await dev.gatt.connect();
+    const svc=await srv.getPrimaryService(SVC);
+    chr=await svc.getCharacteristic(CHR);
+    chr.addEventListener('characteristicvaluechanged',e=>dec.decode(e.target.value).split('\n').forEach(l=>l.trim()&&log('rx',l.trim())));
+    await chr.startNotifications();
+    st('connesso: '+(dev.name||'dispositivo'));
+    $('#bConn').disabled=true;$('#bDisc').disabled=false;
+  }catch(e){log('er',e.message);st('non connesso')}
+}
+function onDisc(){chr=null;joy=false;clearInterval(ka);$('#bJoy').textContent='Avvia modo joystick';st('disconnesso');$('#bConn').disabled=false;$('#bDisc').disabled=true}
+function send(cmd){
+  if(!chr){log('er','non connesso');return Promise.resolve()}
+  const b=enc.encode(cmd);
+  if(b.length>127){log('er','comando oltre 127 byte');return Promise.resolve()}
+  log('tx',cmd);
+  q=q.then(()=>chr.writeValueWithResponse?chr.writeValueWithResponse(b):chr.writeValue(b)).catch(e=>log('er',e.message));
+  return q;
+}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+async function seq(list,gap=800){for(const c of list){await send(c);await wait(gap)}}
+
+// Joystick
+const dirs=[['ULEFT','↖'],['UP','↑'],['URIGHT','↗'],['LEFT','←'],['STOP','■'],['RIGHT','→'],['DLEFT','↙'],['DOWN','↓'],['DRIGHT','↘']];
+dirs.forEach(([n,s])=>{
+  const b=document.createElement('button');b.textContent=s;
+  if(n==='STOP'){b.onclick=()=>send('CMD APP DIR STOP')}
+  else{
+    b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);send('CMD APP DIR '+n)});
+    const up=()=>send('CMD APP DIR STOP');
+    b.addEventListener('pointerup',up);b.addEventListener('pointercancel',up);
+  }
+  b.addEventListener('contextmenu',e=>e.preventDefault());
+  $('#pad').append(b);
+});
+$('#bJoy').onclick=async()=>{
+  if(!chr)return log('er','non connesso');
+  if(!joy){joy=true;$('#bJoy').textContent='Modo joystick attivo';await send('CMD APP_JOYSTICK START');
+    ka=setInterval(()=>send('CMD APP KEEPALIVE'),500)}
+  else{joy=false;clearInterval(ka);await send('CMD APP DIR STOP');$('#bJoy').textContent='Avvia modo joystick'}
+};
+$('#sp').oninput=e=>{$('#spv').textContent=e.target.value};
+$('#sp').onchange=e=>send('CMD APP SPEED '+e.target.value);
+
+// GoTo
+const n=id=>Math.round(parseFloat($(id).value)||0);
+function coords(){
+  const sg=parseInt($('#dsg').value);let d=n('#de_d'),m=n('#de_m'),s=n('#de_s');
+  if(sg<0){if(d!==0)d=-Math.abs(d);else if(m!==0)m=-Math.abs(m);else s=-Math.abs(s)}
+  return [n('#ra_h'),n('#ra_m'),n('#ra_s'),d,m,s].join(' ');
+}
+$('#bGoto').onclick=()=>send('CMD GOTO_ANY_OBJECT '+coords());
+$('#bStop').onclick=()=>send('CMD STOP GOTO');
+$('#bCal0').onclick=()=>send('CMD CALIB_START');
+$('#bCal1').onclick=()=>send('CMD STAR_1_CALIB '+coords());
+['Mercury','Venus','Mars','Jupiter','Saturn','Uranus','Neptune','Moon','Sun'].forEach(o=>{const e=document.createElement('option');e.textContent=o;$('#sol').append(e)});
+$('#bSol').onclick=()=>send('CMD GOTO_SOLAR_SYSTEM '+$('#sol').value);
+
+// Impostazioni
+$('#bSync').onclick=()=>{
+  const d=new Date(),u=$('#utc').checked;
+  const Y=u?d.getUTCFullYear():d.getFullYear(),M=(u?d.getUTCMonth():d.getMonth())+1,D=u?d.getUTCDate():d.getDate();
+  const h=u?d.getUTCHours():d.getHours(),mi=u?d.getUTCMinutes():d.getMinutes(),s=u?d.getUTCSeconds():d.getSeconds();
+  const list=['CMD SET_DATE '+[Y,M,D].join(' '),'CMD SET_TIME '+[h,mi,s].join(' ')];
+  if(!navigator.geolocation){seq(list);return}
+  navigator.geolocation.getCurrentPosition(p=>seq([...list,'CMD SET_LOCATION '+p.coords.latitude.toFixed(5)+' '+p.coords.longitude.toFixed(5)]),
+    e=>{log('er','posizione non disponibile: '+e.message);seq(list)});
+};
+$('#bShow').onclick=()=>send('CMD SHOW_SETTINGS');
+$('#bRel').onclick=()=>send('CMD RELEASE_STEPPERS');
+$('#bRaw').onclick=()=>{const v=$('#raw').value.trim();if(v){send(v);$('#raw').value=''}};
+$('#raw').addEventListener('keydown',e=>{if(e.key==='Enter')$('#bRaw').click()});
+$('#bConn').onclick=connect;
+$('#bDisc').onclick=()=>dev&&dev.gatt.disconnect();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
